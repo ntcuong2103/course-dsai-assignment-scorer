@@ -36,3 +36,9 @@ df = pd.read_csv(paths[1], sep="\t", header=None, names=["path", "label"]).dropn
 RELATION_TOKENS = {
     'Above', 'Below', 'Inside', 'Right', 'Sub', 'Sup', 'NoRel'
 }
+
+RELATIONS = ["Above", "Below", "Inside", "NoRel", "Right", "Sub", "Sup"]
+
+
+# from torchaudio.models.decoder import ctc_decoder
+from torchaudio.models.decoder import cuda_ctc_decoder, CUCTCDecoder

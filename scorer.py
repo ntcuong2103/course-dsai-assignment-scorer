@@ -20,7 +20,7 @@ train_data = "dataset/crohme2019_train.txt"
 val_data = "dataset/crohme2019_valid.txt"
 test_data = "dataset/crohme2019_test.txt"
 
-checkpoint_path = "epoch=46-val_wer=0.1327.ckpt"
+checkpoint_path = "submission.ckpt"
 hidden_size = 256
 num_layers = 2
 
@@ -110,9 +110,9 @@ def test_task3():
     })
 
     # custom
-    kwargs.update({
-        "use_constraint_loss": True,
-    })
+    # kwargs.update({
+    #     "use_constraint_loss": True,
+    # })
     
 
     dm = InkmlDataset_PL(
@@ -343,6 +343,22 @@ class MathOnlineModelTester(MathOnlineModel):
         return loss
 
 
+# class MathOnlineModelTester2(MathOnlineModelTester):
+#     def __init__(self, *args, **kwargs):
+#         super().__init__(*args, **kwargs)
+#         self.vocab = VocabTester("vocab.json")
+#         self.cuda_decoder = CudaCTCDecoder(vocab=Vocab('vocab.json'))
+#         self.greedy_decoder = GreedyCTCDecoder(self.vocab)
+#         self.model = LSTM_TemporalClassificationTester(
+#             input_size=kwargs["input_size"],
+#             hidden_size=kwargs["hidden_size"],
+#             num_layers=kwargs["num_layers"],
+#             num_classes=kwargs["output_size"],
+#         )
+
+#     def test_step(self, batch, batch_idx):
+#         return super().test_step(batch, batch_idx)
+
 def test_task8(checkpoint_path):
     model = MathOnlineModelTester.load_from_checkpoint(
         checkpoint_path,
@@ -354,16 +370,33 @@ def test_task8(checkpoint_path):
     )
 
     model.eval()
+
+    sig = inspect.signature(InkmlDataset_PL.__init__)
+    # Check if vocab is in kwargs of signature
+    if "vocab" not in sig.parameters:
+        kwargs = {"vocab_file": "vocab.json"}
+    else:
+        kwargs = {"vocab": Vocab("vocab.json")}
+    
+    kwargs.update({
+        "root_dir": root_dir,
+        "train_data": test_data,
+        "val_data": test_data,
+        "test_data": test_data,
+        "batch_size": 4,
+    })
+
+    # custom
+    # kwargs.update({
+    #     "use_constraint_loss": True,
+    # })
+    
+
     dm = InkmlDataset_PL(
-        root_dir=root_dir,
-        train_data=test_data,
-        val_data=test_data,
-        test_data=test_data,
-        # vocab_file="vocab.json",
-        vocab=Vocab("vocab.json"),
-        batch_size=32,
-        use_constraint_loss=True,
-    )
+        **kwargs
+    ) 
+
+    
     trainer = Trainer(
         accelerator="auto",
         enable_progress_bar=True,
@@ -372,6 +405,36 @@ def test_task8(checkpoint_path):
     )
 
     trainer.test(model, datamodule=dm)
+
+# def test_cuda_decoder(checkpoint_path):
+#     model = MathOnlineModelTester2.load_from_checkpoint(
+#         checkpoint_path,
+#         input_size=4,
+#         output_size=109,
+#         hidden_size=hidden_size,
+#         num_layers=num_layers,
+#         vocab=VocabTester("vocab.json"),
+#     )
+
+#     model.eval()
+#     dm = InkmlDataset_PL(
+#         root_dir=root_dir,
+#         train_data=test_data,
+#         val_data=test_data,
+#         test_data=test_data,
+#         # vocab_file="vocab.json",
+#         vocab=Vocab("vocab.json"),
+#         batch_size=32,
+#         use_constraint_loss=True,
+#     )
+#     trainer = Trainer(
+#         accelerator="auto",
+#         enable_progress_bar=True,
+#         devices=1,
+#         fast_dev_run=True,
+#     )
+
+#     trainer.test(model, datamodule=dm)
 
 
 def main():
@@ -388,6 +451,7 @@ def main():
     # checkpoint_path = artifact_dir + '/model.ckpt'
 
     test_task8(checkpoint_path)
+    # test_cuda_decoder(checkpoint_path)
 
 
 if __name__ == "__main__":
