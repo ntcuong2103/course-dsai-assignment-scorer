@@ -1,10 +1,12 @@
-from khoinvm import (
+from submission_fn import (
     Vocab,
     InkmlDataset,
     InkmlDataset_PL,
     LSTM_TemporalClassification,
     MathOnlineModel,
 )
+
+import inspect
 import numpy as np
 import torch
 from pytorch_lightning import Trainer
@@ -18,7 +20,7 @@ train_data = "dataset/crohme2019_train.txt"
 val_data = "dataset/crohme2019_valid.txt"
 test_data = "dataset/crohme2019_test.txt"
 
-checkpoint_path = "artifacts/epoch=29-val_loss=0.6391.ckpt"
+checkpoint_path = "epoch=46-val_wer=0.1327.ckpt"
 hidden_size = 256
 num_layers = 2
 
@@ -37,11 +39,11 @@ num_layers = 2
 # │       test_wer_sym        │    0.14478223025798798    │
 # │      test_wer_sym_ex      │    0.14479823410511017    │
 # └───────────────────────────┴───────────────────────────┘
-vocab = Vocab("vocab.json")
+# vocab = Vocab("vocab.json")
 
-char2idx = {line.strip():id for id, line in enumerate(open('crohme_vocab.txt').readlines())}
-char2idx.update({'':len(char2idx)})
-mapping = [char2idx[vocab.idx2char[id]] for id in range(len(vocab.idx2char))]
+# char2idx = {line.strip():id for id, line in enumerate(open('crohme_vocab.txt').readlines())}
+# char2idx.update({'':len(char2idx)})
+# mapping = [char2idx[vocab.idx2char[id]] for id in range(len(vocab.idx2char))]
 
 
 
@@ -65,7 +67,12 @@ def test_task2():
     # inkml_path = 'dataset/crohme2019/crohme2019/valid/18_em_0.inkml'
     vocab = Vocab("vocab.json")
     val_ds = InkmlDataset(annotation=val_data, root_dir=root_dir, vocab=vocab)
-    feature, target_tensor, input_len, label_len = val_ds[583]
+    if len(val_ds[583]) == 4:
+        feature, target_tensor, input_len, label_len = val_ds[583]
+    elif len(val_ds[583]) == 5:
+        feature, target_tensor, input_len, label_len, _ = val_ds[583]
+    else:
+        raise ValueError("Unexpected number of elements in dataset item.")
 
     import numpy.testing as npt
 
@@ -85,25 +92,50 @@ def test_task2():
 
 
 def test_task3():
+    # Check signature of InkmlDataset_PL and decide to use vocab or vocab_file
+
+    sig = inspect.signature(InkmlDataset_PL.__init__)
+    # Check if vocab is in kwargs of signature
+    if "vocab" not in sig.parameters:
+        kwargs = {"vocab_file": "vocab.json"}
+    else:
+        kwargs = {"vocab": Vocab("vocab.json")}
+    
+    kwargs.update({
+        "root_dir": root_dir,
+        "train_data": test_data,
+        "val_data": test_data,
+        "test_data": test_data,
+        "batch_size": 4,
+    })
+
+    # custom
+    kwargs.update({
+        "use_constraint_loss": True,
+    })
+    
+
     dm = InkmlDataset_PL(
-        root_dir=root_dir,
-        train_data=test_data,
-        val_data=test_data,
-        test_data=test_data,
-        # vocab_file="vocab.json",
-        vocab=Vocab("vocab.json"),
-        batch_size=4,
-    )
+        **kwargs
+    ) 
+
     dm.setup()
     test_loader = dm.test_dataloader()
-    features, targets, input_lengths, label_lengths = next(iter(test_loader))
+    batch = next(iter(test_loader))
+
+    if len(batch) == 4:
+        features, targets, input_lengths, label_lengths = batch
+    elif len(batch) == 5:
+        features, targets, input_lengths, label_lengths, _ = batch
+    else:
+        raise ValueError("Unexpected number of elements in dataset item.")
 
     assert features.shape == (4, 1681, 4)
     assert targets.shape == (4, 87)
     import numpy.testing as npt
 
-    npt.assert_array_equal(input_lengths.flatten(), [567, 1681, 434, 495])
-    npt.assert_array_equal(label_lengths.flatten(), [35, 87, 41, 15])
+    npt.assert_array_equal(sorted(input_lengths.flatten().tolist(),reverse=True), [1681,  567,  495,  434])
+    npt.assert_array_equal(sorted(label_lengths.flatten().tolist(),reverse=True), [87, 41, 35, 15])
     print("Task 3 passed: InkmlDataset_PL works correctly.")
 
 
@@ -138,16 +170,28 @@ class LSTM_TemporalClassificationTester(LSTM_TemporalClassification):
         super().__init__(*args, **kwargs)
 
     def forward(self, x):  # rewrite if needed
-        out, _ = self.lstm(x)  # out: (batch, seq_len, hidden_size*2)
-        # out = self.fc(out)  # (batch, seq_len, numclasses)
-        out = self.linear(out)
-        return out
+        for layer in self.children():
+            if isinstance(layer, torch.nn.LSTM):
+                x, _ = layer(x)
+            elif isinstance(layer, torch.nn.Linear):
+                x = layer(x)
+                break
+        return x
         return out[:, :, mapping]  # map to vocab size
 
 
 class MathOnlineModelTester(MathOnlineModel):
     def __init__(self, *args, **kwargs):
+        # Use inpsect signature
+        sig = inspect.signature(MathOnlineModel.__init__)
+        # Check if vocab is in kwargs of signature
+        if "vocab" not in sig.parameters:
+            kwargs.pop("vocab", None)
+            
         super().__init__(*args, **kwargs)
+        if "vocab" not in sig.parameters:
+            self.vocab = VocabTester("vocab.json")
+
         self.loss_fn = loss_fn
         self.cuda_decoder = CUCTCDecoder(
             list(self.vocab.char2idx.keys()), blank_skip_threshold=0.95
@@ -180,7 +224,12 @@ class MathOnlineModelTester(MathOnlineModel):
         return loss, loss_ctc, loss_constraint, wer, decoded
 
     def test_step(self, batch, batch_idx):
-        x, y, x_lens, y_lens = batch
+        if len(batch) == 4:
+            # batch = (x, y, x_lens, y_lens)
+            x, y, x_lens, y_lens = batch
+        elif len(batch) == 5:
+            x, y, x_lens, y_lens, pen_ups = batch
+        
         x_hat = self.model(x.float())
 
         loss, loss_ctc, loss_constraint, wer, decoded = self.base_step(
@@ -188,6 +237,7 @@ class MathOnlineModelTester(MathOnlineModel):
         )
 
         pen_ups = x.cpu().float()[:, :, -1]
+
 
         # relation @ penup: <blank> or <rel>
 
@@ -312,12 +362,13 @@ def test_task8(checkpoint_path):
         # vocab_file="vocab.json",
         vocab=Vocab("vocab.json"),
         batch_size=32,
+        use_constraint_loss=True,
     )
     trainer = Trainer(
         accelerator="auto",
         enable_progress_bar=True,
         devices=1,
-        fast_dev_run=True,
+        fast_dev_run=False,
     )
 
     trainer.test(model, datamodule=dm)

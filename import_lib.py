@@ -21,7 +21,8 @@ from torch.nn.utils.rnn import pad_sequence
 import matplotlib.pyplot as plt
 from helper import *
 from collections.abc import Sequence
-from typing import Literal, Optional, Union
+from typing import Literal, Optional, Union, List
+import torchaudio
 
 import json
 paths = [
@@ -31,3 +32,7 @@ paths = [
 ]
 df = pd.read_csv(paths[1], sep="\t", header=None, names=["path", "label"]).dropna().astype(str)
 # df.head(10)
+
+RELATION_TOKENS = {
+    'Above', 'Below', 'Inside', 'Right', 'Sub', 'Sup', 'NoRel'
+}
