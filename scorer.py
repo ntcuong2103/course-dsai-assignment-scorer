@@ -16,6 +16,7 @@ from torchaudio.functional import edit_distance as ed
 # base config
 root_dir = "dataset/crohme2019"
 # root_dir="dataset/crohme2019/crohme2019"
+# root_dir = "dataset"
 train_data = "dataset/crohme2019_train.txt"
 val_data = "dataset/crohme2019_valid.txt"
 test_data = "dataset/crohme2019_test.txt"
@@ -130,9 +131,13 @@ def test_task3():
     else:
         raise ValueError("Unexpected number of elements in dataset item.")
 
-    assert features.shape == (4, 1681, 4)
-    assert targets.shape == (4, 87)
     import numpy.testing as npt
+    npt.assert_array_equal(features.shape, (4, 1681, 4))
+    if len(targets.shape) == 2:
+        npt.assert_array_equal(targets.shape, (4, 87))
+    else:
+        # If targets is a 1D tensor, it might be a flattened version of the labels
+        npt.assert_array_equal(targets.shape, (178))
 
     npt.assert_array_equal(sorted(input_lengths.flatten().tolist(),reverse=True), [1681,  567,  495,  434])
     npt.assert_array_equal(sorted(label_lengths.flatten().tolist(),reverse=True), [87, 41, 35, 15])
@@ -163,6 +168,8 @@ class VocabTester(Vocab):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.rels = ["Right", "Sub", "Sup", "Above", "Below", "Inside", "NoRel"]
+    def __len__(self):
+        return len(self.char2idx)
 
 
 class LSTM_TemporalClassificationTester(LSTM_TemporalClassification):
@@ -212,8 +219,16 @@ class MathOnlineModelTester(MathOnlineModel):
         total_lens = 0
 
         decoded = self.cuda_decoder(x_hat.log_softmax(-1), x_lens.int())
-        for decoded_seq, y_seq, y_len in zip(decoded, y, y_lens):
-            label = y_seq[:y_len].cpu().numpy()
+
+        labels = []
+
+        if len(y.shape) == 1:
+            y_lens_list = [0] + y_lens.cumsum(0).tolist()
+            labels = [y[y_len_start:y_len_end].cpu().numpy() for y_len_start, y_len_end in zip(y_lens_list[:-1], y_lens_list[1:])]
+        else:
+            labels = [y_seq[:y_len].cpu().numpy() for y_seq, y_len in zip(y, y_lens)]
+
+        for decoded_seq, label, y_len in zip(decoded, labels, y_lens):
             edit_distance = ed(
                 self.vocab.decode(label), decoded_seq[0].words
             )  # first hyp
@@ -229,7 +244,7 @@ class MathOnlineModelTester(MathOnlineModel):
             x, y, x_lens, y_lens = batch
         elif len(batch) == 5:
             x, y, x_lens, y_lens, pen_ups = batch
-        
+
         x_hat = self.model(x.float())
 
         loss, loss_ctc, loss_constraint, wer, decoded = self.base_step(
@@ -238,13 +253,9 @@ class MathOnlineModelTester(MathOnlineModel):
 
         pen_ups = x.cpu().float()[:, :, -1]
 
-
         # relation @ penup: <blank> or <rel>
 
         #         p_rel = x_hat.log_softmax(-1)[torch.where(pen_up > 0)]
-
-        total_edits = 0
-        total_lens = 0
 
         total_edits_sym = 0
         total_lens_sym = 0
@@ -255,11 +266,15 @@ class MathOnlineModelTester(MathOnlineModel):
         total_edits_sym_ex = 0
         total_edits_rel_ex = 0
 
-        for seq, decoded_seq, y_seq, y_len, pen_up in zip(
-            x_hat.detach().cpu(), decoded, y, y_lens, pen_ups
-        ):
-            label = y_seq[:y_len].cpu().numpy()
+        if len(y.shape) == 1:
+            y_lens_list = [0] + y_lens.cumsum(0).tolist()
+            labels = [y[y_len_start:y_len_end].cpu().numpy() for y_len_start, y_len_end in zip(y_lens_list[:-1], y_lens_list[1:])]
+        else:
+            labels = [y_seq[:y_len].cpu().numpy() for y_seq, y_len in zip(y, y_lens)]
 
+        for seq, decoded_seq, label, y_len, pen_up in zip(
+            x_hat.detach().cpu(), decoded, labels, y_lens, pen_ups
+        ):  
             label_sym = [
                 l for l in self.vocab.decode(label) if l not in self.vocab.rels
             ]
@@ -279,19 +294,13 @@ class MathOnlineModelTester(MathOnlineModel):
             # exact decode
             # mask: rels + <blank>
             blank_idx = 0
-            masked_indices = torch.tensor(
-                [self.vocab.char2idx[l] for l in self.vocab.rels] + [blank_idx]
-            )
-            decoded_rel_ex = self.vocab.decode(
-                [
-                    token
-                    for token in masked_indices[
-                        seq[:, masked_indices].argmax(-1)[torch.where(pen_up > 0)]
-                    ].numpy()
-                    if token != blank_idx
-                ]
-            )
-            decoded_sym_ex = self.greedy_decoder.forward(seq, pen_up)
+            rel_idx = [self.vocab.char2idx[r] for r in self.vocab.rels]
+            tokens = seq.argmax(-1)[torch.where(pen_up > 0)].numpy()
+            rel_pos = [i for i, token in enumerate(tokens) if token != blank_idx and token in rel_idx]
+            decoded_rel_ex = self.vocab.decode(tokens[rel_pos])
+            rel_mask = torch.zeros_like(pen_up)
+            rel_mask[torch.where(pen_up > 0)[0][rel_pos]] = 1
+            decoded_sym_ex = self.greedy_decoder.forward(seq, rel_mask)
 
             edit_distance = ed(label_sym, decoded_sym_ex)
             total_edits_sym_ex += edit_distance
@@ -300,7 +309,7 @@ class MathOnlineModelTester(MathOnlineModel):
             total_edits_rel_ex += edit_distance
 
             # if decoded_rel != decoded_rel_ex:
-            # print (label_rel, decoded_rel, decoded_rel_ex, ed(label_rel,decoded_rel), ed(label_rel, decoded_rel_ex))
+            #     print (label_rel, decoded_rel, decoded_rel_ex, ed(label_rel,decoded_rel), ed(label_rel, decoded_rel_ex))
 
         self.log("test_loss", loss, prog_bar=True, on_step=False, on_epoch=True)
         self.log(
